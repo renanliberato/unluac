@@ -54,7 +54,9 @@ abstract public class LHeaderType extends BObjectType<LHeader> {
   protected void parse_format(ByteBuffer buffer, BHeader header, LHeaderParseState s) {
     // 1 byte Lua "format"
     int format = 0xFF & buffer.get();
-    if(format != 0) {
+    // Some games ship Lua bytecode with a non-zero format byte (e.g. 1).
+    // Accept 0 or 1 to allow decompilation of those chunks.
+    if(format != 0 && format != 1) {
       throw new IllegalStateException("The input chunk reports a non-standard lua format: " + format);
     }
     s.format = format;
@@ -105,7 +107,9 @@ abstract public class LHeaderType extends BObjectType<LHeader> {
     if(header.debug) {
       System.out.println("-- instruction size: " + instructionSize);
     }
-    if(instructionSize != 4) {
+    // Some custom builds report 8 even though instructions are still 32-bit.
+    // Accept 4 or 8; unluac will still parse as 32-bit instructions.
+    if(instructionSize != 4 && instructionSize != 8) {
       throw new IllegalStateException("The input chunk reports an unsupported instruction size: " + instructionSize + " bytes");
     }
   }
@@ -249,11 +253,40 @@ class LHeaderType53 extends LHeaderType {
   protected void parse_main(ByteBuffer buffer, BHeader header, LHeaderParseState s) {
     parse_format(buffer, header, s);
     parse_tail(buffer, header, s);
-    parse_int_size(buffer, header, s);
-    parse_size_t_size(buffer, header, s);
-    parse_instruction_size(buffer, header, s);
-    parse_integer_size(buffer, header, s);
-    parse_float_size(buffer, header, s);
+    // Custom Lua 5.3 variant seen in some games omits the instruction size byte.
+    // Detect: after 4 size bytes, the next bytes should start the luac_int test (0x78 0x56).
+    int intSize = 0xFF & buffer.get();
+    int sizeTSize = 0xFF & buffer.get();
+    int third = 0xFF & buffer.get();
+    int fourth = 0xFF & buffer.get();
+    buffer.mark();
+    byte b0 = buffer.get();
+    byte b1 = buffer.get();
+    buffer.reset();
+    boolean noInstructionSize = (third == 8 && fourth == 8 && b0 == 0x78 && b1 == 0x56);
+
+    s.integer = new BIntegerType(intSize);
+    s.sizeT = new BSizeTType(sizeTSize);
+
+    if(noInstructionSize) {
+      // Header layout: int, size_t, lua_int_size, lua_num_size
+      s.lIntegerSize = third;
+      s.lFloatSize = fourth;
+      if(header.debug) {
+        System.out.println("-- instruction size: (omitted)");
+      }
+    } else {
+      // Standard 5.3 layout: int, size_t, instruction_size, lua_int_size, lua_num_size
+      int instructionSize = third;
+      if(header.debug) {
+        System.out.println("-- instruction size: " + instructionSize);
+      }
+      if(instructionSize != 4 && instructionSize != 8) {
+        throw new IllegalStateException("The input chunk reports an unsupported instruction size: " + instructionSize + " bytes");
+      }
+      s.lIntegerSize = fourth;
+      s.lFloatSize = 0xFF & buffer.get();
+    }
     byte[] endianness = new byte[s.lIntegerSize];
     buffer.get(endianness);
     if(endianness[0] == 0x78 && endianness[1] == 0x56) {
